@@ -6,7 +6,7 @@ import numpy as np
 model = YOLO('yolov8n.pt')  # 可替換成 yolov8s.pt 或其他
 
 # === 2. 指定圖片路徑 ===
-image_path = 'michael-sum-LEpfefQf4rU-unsplash.jpg'  # <<== 替換為你的圖片檔案名稱
+image_path = 'FELV-cat.jpg'  # <<== 替換為你的圖片檔案名稱
 img = cv2.imread(image_path)
 
 # === 3. 推論圖片，降低信心門檻 ===
