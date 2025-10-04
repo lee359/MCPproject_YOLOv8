@@ -8,10 +8,10 @@ robotflow：對貓狗圖片進行標記（train:1555張-80%，vaild：195張-10%
 編程語言：python
 
 ### PR_curve:
-![alt text](image-1.png)
+![alt text](resultdata/image-1.png)
 
 ### P-curve
-![alt text](P_curve-1.png)
+![alt text](P_curve.png)
 
 ### R-curve
 ![alt text](R_curve.png)
