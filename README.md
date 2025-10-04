@@ -11,22 +11,22 @@ robotflow：對貓狗圖片進行標記（train:1555張-80%，vaild：195張-10%
 ![alt text](resultdata/image-1.png)
 
 ### P-curve
-![alt text](P_curve.png)
+![alt text](resultdata/P_curve.png)
 
 ### R-curve
-![alt text](R_curve.png)
+![alt text](resultdata/R_curve.png)
 
 ### F1-curve
-![alt text](F1_curve.png)
+![alt text](resultdata/F1_curve.png)
 
 ### results:
-![alt text](image-2.png)
+![alt text](resultdata/image-2.png)
 
 ### confusion matrix normalized
-![alt text](confusion_matrix_normalized.png)
+![alt text](resultdata/confusion_matrix_normalized.png)
 
 ### result:
-![alt text](image-3.png)
+![alt text](resultdata/image-3.png)
 
 
 
