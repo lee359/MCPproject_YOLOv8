@@ -13,6 +13,10 @@
 ### val_batch0_pred:
 <img width="500" height="1000" alt="image" src="https://github.com/user-attachments/assets/151a2122-f48f-4e39-ac97-b0134a18ff12" />
 
+colab檔案界面：
+
+
+
 
 
 
