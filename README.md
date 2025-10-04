@@ -1,19 +1,32 @@
 ﻿# YOLOv8
 
 ## 目前進度
-資料處理平臺：robotflow，對dog圖片進行標記（train:587張-55%；vaild：300張-28%；test：180張-17%），匯出YAML檔案做訓練。\
-運算環境：google colab\
-模型：YOLOv8
+robotflow：對貓狗圖片進行標記（train:1555張-80%，vaild：195張-10%，test：194張-10%）
+訓練模型方法：colab線上訓練
+模型：YOLOv8n
+編程平臺：vscode
+編程語言：python
+
 ### PR_curve:
-<img width="500" height="1000" alt="image" src="https://github.com/user-attachments/assets/609965e1-24af-4ec2-a513-83cd4ef5e125" />
+![alt text](image-1.png)
+
+### P-curve
+![alt text](P_curve-1.png)
+
+### R-curve
+![alt text](R_curve.png)
+
+### F1-curve
+![alt text](F1_curve.png)
 
 ### results:
-<img width="500" height="1000" alt="image" src="https://github.com/user-attachments/assets/aff46ab5-708f-4073-b281-ebfa81ff2029" />
+![alt text](image-2.png)
 
-### val_batch0_pred:
-<img width="500" height="1000" alt="image" src="https://github.com/user-attachments/assets/151a2122-f48f-4e39-ac97-b0134a18ff12" />
+### confusion matrix normalized
+![alt text](confusion_matrix_normalized.png)
 
-colab檔案界面：
+### result:
+![alt text](image-3.png)
 
 
 
