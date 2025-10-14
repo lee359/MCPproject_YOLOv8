@@ -2,9 +2,13 @@
 
 ## 目前進度
 robotflow：對貓狗圖片進行標記（train:1555張-80%，vaild：195張-10%，test：194張-10%）
+
 訓練模型方法：colab線上訓練
+
 模型：YOLOv8n
+
 編程平臺：vscode
+
 編程語言：python
 
 ### PR_curve:
