@@ -1,23 +1,19 @@
 import cv2
 from ultralytics import YOLO
-import time
 from collections import deque
 import numpy as np
 
-# ❗請替換為你的 ESP32-CAM 實際 IP
+# ESP32-CAM 設定
 ESP32_URL = 'http://192.168.0.102:81/stream'
-
-# 讀取 ESP32 串流
 cap = cv2.VideoCapture(ESP32_URL)
-
-# 設定緩衝區大小為 1，避免累積延遲
 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-# 載入模型：可以用 yolov8n.pt 或你訓練好的 best.pt
-model = YOLO('best.pt')  # 或 'best.pt'
+# 載入模型
+model = YOLO('best.pt')
 
-# 用於平滑檢測結果，減少閃爍
-detection_history = deque(maxlen=3)  # 保存最近3幀的檢測結果
+# 追踪系統初始化
+tracked_objects = {}
+object_id_counter = [0]
 
 if not cap.isOpened():
     print("❌ 無法連接到 ESP32-CAM 串流")
@@ -25,13 +21,15 @@ if not cap.isOpened():
 
 print("✅ 成功連線，開始辨識...")
 
-# 跳幀計數器 - 每 N 幀處理一次
-frame_skip = 10  # 每 2 幀處理 1 幀，可調整為 3, 4 等
-frame_count = 0
+frame_skip, frame_count = 5, 0
 
-# FPS 控制（已禁用显示）
-# prev_time = time.time()
-# fps_display = 0
+def get_center(bbox):
+    """計算邊界框中心點"""
+    return [(bbox[0] + bbox[2])/2, (bbox[1] + bbox[3])/2]
+
+def calculate_distance(center1, center2):
+    """計算兩點間距離"""
+    return np.sqrt((center1[0] - center2[0])**2 + (center1[1] - center2[1])**2)
 
 while True:
     ret, frame = cap.read()
@@ -41,96 +39,96 @@ while True:
 
     frame_count += 1
     
-    # 跳幀處理：只處理特定幀
+    # 跳幀處理
     if frame_count % frame_skip != 0:
-        # 顯示原始畫面（不辨識）
         cv2.imshow("ESP32-CAM + YOLOv8", frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
         continue
     
-    # 清空緩衝區，確保取得最新畫面
-    # 讀取並丟棄多餘的幀
+    # 清空緩衝區
     for _ in range(int(cap.get(cv2.CAP_PROP_BUFFERSIZE))):
         cap.grab()
     
-    # 將畫面送入模型進行推論
-    results = model.predict(source=frame, imgsz=416, conf=confidence_threshold, iou=0.5, verbose=False)
+    # 模型推論
+    results = model.predict(source=frame, imgsz=416, conf=0.4, iou=0.45, verbose=False)
     
-    # 獲取當前幀的檢測結果
-    current_detections = []
-    if len(results[0].boxes) > 0:
-        for box in results[0].boxes:
-            # 提取邊界框座標、信心度和類別
-            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-            conf = float(box.conf[0])
-            cls = int(box.cls[0])
-            current_detections.append({
-                'bbox': [x1, y1, x2, y2],
-                'conf': conf,
-                'cls': cls
-            })
+    # 提取檢測結果
+    current_detections = [
+        {
+            'bbox': box.xyxy[0].cpu().numpy().tolist(),
+            'conf': float(box.conf[0]),
+            'cls': int(box.cls[0])
+        }
+        for box in results[0].boxes
+    ]
     
-    # 將當前檢測添加到歷史記錄
-    detection_history.append(current_detections)
+    # 更新追踪物體年齡，刪除過期物體
+    for obj_id in list(tracked_objects.keys()):
+        tracked_objects[obj_id]['age'] += 1
+        if tracked_objects[obj_id]['age'] > 3:
+            del tracked_objects[obj_id]
     
-    # 平滑處理：只顯示在多幀中都出現的檢測
-    stable_detections = []
-    if len(detection_history) >= 2:  # 至少有2幀數據
-        for det in current_detections:
-            # 檢查這個檢測是否在前一幀也出現過（位置相近）
-            is_stable = False
-            for prev_frame_dets in list(detection_history)[:-1]:  # 檢查歷史幀
-                for prev_det in prev_frame_dets:
-                    if prev_det['cls'] == det['cls']:  # 同類別
-                        # 計算邊界框中心點距離
-                        curr_center = [(det['bbox'][0] + det['bbox'][2])/2, 
-                                     (det['bbox'][1] + det['bbox'][3])/2]
-                        prev_center = [(prev_det['bbox'][0] + prev_det['bbox'][2])/2,
-                                     (prev_det['bbox'][1] + prev_det['bbox'][3])/2]
-                        distance = np.sqrt((curr_center[0] - prev_center[0])**2 + 
-                                         (curr_center[1] - prev_center[1])**2)
-                        
-                        # 如果中心點距離小於50像素，認為是同一物體
-                        if distance < 50:
-                            is_stable = True
-                            break
-                if is_stable:
-                    break
-            
-            # 如果是穩定的檢測或信心度很高，則添加
-            if is_stable or det['conf'] > 0.6:
-                stable_detections.append(det)
-    else:
-        # 初始幀，使用高信心度的檢測
-        stable_detections = [det for det in current_detections if det['conf'] > 0.5]
+    # 匹配與追踪
+    for det in current_detections:
+        curr_center = get_center(det['bbox'])
+        best_match_id, best_similarity = None, 0
+        
+        # 尋找最佳匹配
+        for obj_id, tracked in tracked_objects.items():
+            if tracked['cls'] == det['cls'] and tracked['bbox']:
+                distance = calculate_distance(curr_center, get_center(tracked['bbox'][-1]))
+                if distance < 60:
+                    similarity = 1 / (1 + distance / 50)
+                    if similarity > best_similarity:
+                        best_similarity = similarity
+                        best_match_id = obj_id
+        
+        # 更新或創建物體追踪
+        if best_match_id and best_similarity > 0.5:
+            tracked_objects[best_match_id]['bbox'].append(det['bbox'])
+            tracked_objects[best_match_id]['conf'].append(det['conf'])
+            tracked_objects[best_match_id]['age'] = 0
+            # 保持最近5幀
+            if len(tracked_objects[best_match_id]['bbox']) > 5:
+                tracked_objects[best_match_id]['bbox'].pop(0)
+                tracked_objects[best_match_id]['conf'].pop(0)
+        elif det['conf'] > 0.5:
+            # 新物體
+            tracked_objects[object_id_counter[0]] = {
+                'bbox': [det['bbox']],
+                'conf': [det['conf']],
+                'cls': det['cls'],
+                'age': 0
+            }
+            object_id_counter[0] += 1
     
-    # 手動繪製穩定的檢測結果
+    # 生成穩定檢測（至少2幀且當前幀有匹配）
+    stable_detections = [
+        {
+            'bbox': np.mean(tracked['bbox'], axis=0).tolist(),
+            'conf': np.mean(tracked['conf']),
+            'cls': tracked['cls']
+        }
+        for tracked in tracked_objects.values()
+        if len(tracked['bbox']) >= 2 and tracked['age'] == 0
+    ]
+    
+    # 繪製檢測結果
     annotated_frame = frame.copy()
     for det in stable_detections:
-        x1, y1, x2, y2 = [int(v) for v in det['bbox']]
-        conf = det['conf']
-        cls = det['cls']
+        x1, y1, x2, y2 = map(int, det['bbox'])
+        label = f"{model.names[det['cls']]} {det['conf']:.2f}"
         
-        # 獲取類別名稱
-        class_name = model.names[cls]
-        
-        # 繪製邊界框（使用較粗的線條）
+        # 繪製邊界框
         cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
         
-        # 繪製標籤背景
-        label = f'{class_name} {conf:.2f}'
+        # 繪製標籤
         (label_w, label_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
         cv2.rectangle(annotated_frame, (x1, y1 - label_h - 10), (x1 + label_w, y1), (0, 255, 0), -1)
-        
-        # 繪製標籤文字
-        cv2.putText(annotated_frame, label, (x1, y1 - 5), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
+        cv2.putText(annotated_frame, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
     
-    # 顯示畫面
     cv2.imshow("ESP32-CAM + YOLOv8", annotated_frame)
-
-    # 按下 q 離開
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
