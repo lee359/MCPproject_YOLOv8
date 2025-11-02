@@ -1,6 +1,5 @@
 # server.py
 from mcp.server.fastmcp import FastMCP, Image
-from PIL import Image as PILImage
 from ultralytics import YOLO
 import cv2
 import numpy as np
@@ -9,10 +8,14 @@ from io import BytesIO
 import time
 import requests
 import os
+from filterpy.kalman import KalmanFilter
 
 # 獲取腳本所在目錄的絕對路徑
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(SCRIPT_DIR, "best.pt")
+
+# ESP32-CAM 串流 URL
+DEFAULT_STREAM_URL = 'http://192.168.0.102:81/stream'
 
 # 加載訓練好的模型（使用絕對路徑）
 model = YOLO(MODEL_PATH)
@@ -20,22 +23,45 @@ model = YOLO(MODEL_PATH)
 # Create an MCP server
 mcp = FastMCP("YOLOv8 Detection Server")
 
-# Add an addition tool
-@mcp.tool()
-def add(a: int, b: int) -> int:
-    """Add two numbers"""
-    return a + b
+# Kalman Filter 輔助函數
+def create_kalman_filter():
+    """創建 Kalman Filter (追踪中心點 x, y)"""
+    kf = KalmanFilter(dim_x=4, dim_z=2)
+    # 狀態轉移矩陣 [x, y, vx, vy]
+    kf.F = np.array([[1, 0, 1, 0],
+                     [0, 1, 0, 1],
+                     [0, 0, 1, 0],
+                     [0, 0, 0, 1]])
+    # 測量矩陣
+    kf.H = np.array([[1, 0, 0, 0],
+                     [0, 1, 0, 0]])
+    # 測量噪聲
+    kf.R *= 10
+    # 過程噪聲
+    kf.Q *= 0.1
+    # 初始協方差
+    kf.P *= 1000
+    return kf
+
+def get_center(bbox):
+    """計算邊界框中心點"""
+    return [(bbox[0] + bbox[2])/2, (bbox[1] + bbox[3])/2]
+
+def calculate_distance(center1, center2):
+    """計算兩點間距離"""
+    return np.sqrt((center1[0] - center2[0])**2 + (center1[1] - center2[1])**2)
 
 @mcp.tool()
-def detect_stream_frame(stream_url: str, imgsz: int = 416, conf: float = 0.3, timeout: int = 10) -> dict:
+def detect_esp32_stream(imgsz: int = 416, conf: float = 0.25, use_kalman: bool = False) -> dict:
     """
-    從串流 URL 捕獲一幀並進行 YOLO 物體偵測（改進版，含超時控制）
+    從預設的 ESP32-CAM 串流進行單幀 YOLO 物體偵測
+    
+    預設串流 URL: http://192.168.0.102:81/stream
     
     Args:
-        stream_url: 串流 URL (例如: http://192.168.0.103:81/stream)
         imgsz: 圖像大小，預設 416
-        conf: 信心閾值，預設 0.3
-        timeout: 總超時時間（秒），預設 10
+        conf: 信心閾值，預設 0.25
+        use_kalman: 是否使用 Kalman Filter（單幀檢測建議設為 False）
     
     Returns:
         dict: 包含偵測結果和註釋圖像的字典
@@ -43,12 +69,12 @@ def detect_stream_frame(stream_url: str, imgsz: int = 416, conf: float = 0.3, ti
     start_time = time.time()
     
     try:
-        # 連接到串流（增加超時控制）
-        cap = cv2.VideoCapture(stream_url)
+        # 連接到串流
+        cap = cv2.VideoCapture(DEFAULT_STREAM_URL)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         
         # 設定連接超時
-        connect_timeout = 5  # 5 秒連接超時
+        connect_timeout = 5
         wait_start = time.time()
         
         while not cap.isOpened() and (time.time() - wait_start) < connect_timeout:
@@ -57,12 +83,11 @@ def detect_stream_frame(stream_url: str, imgsz: int = 416, conf: float = 0.3, ti
         if not cap.isOpened():
             return {
                 "success": False,
-                "error": f"無法在 {connect_timeout} 秒內連接到串流: {stream_url}",
+                "error": f"無法在 {connect_timeout} 秒內連接到串流: {DEFAULT_STREAM_URL}",
                 "elapsed_time": round(time.time() - start_time, 2)
             }
         
-        # 讀取一幀（帶超時檢查）
-        read_timeout = 3  # 3 秒讀取超時
+        # 讀取一幀
         read_start = time.time()
         ret, frame = cap.read()
         read_time = time.time() - read_start
@@ -75,33 +100,35 @@ def detect_stream_frame(stream_url: str, imgsz: int = 416, conf: float = 0.3, ti
                 "elapsed_time": round(time.time() - start_time, 2)
             }
         
-        if read_time > read_timeout:
-            cap.release()
-            return {
-                "success": False,
-                "error": f"讀取畫面超時（{read_time:.2f}秒 > {read_timeout}秒）",
-                "elapsed_time": round(time.time() - start_time, 2)
-            }
-        
         # 執行 YOLO 偵測
         predict_start = time.time()
-        results = model.predict(source=frame, imgsz=imgsz, conf=conf, verbose=False)
+        results = model.predict(source=frame, imgsz=imgsz, conf=conf, iou=0.15, verbose=False)
         predict_time = time.time() - predict_start
         
-        # 取得偵測結果
+        # 提取檢測結果並繪製
         detections = []
-        for r in results:
-            boxes = r.boxes
-            for box in boxes:
-                detection = {
-                    "class": r.names[int(box.cls[0])],
-                    "confidence": float(box.conf[0]),
-                    "bbox": box.xyxy[0].tolist()  # [x1, y1, x2, y2]
-                }
-                detections.append(detection)
+        annotated_frame = frame.copy()
         
-        # 將辨識結果繪製在原圖上
-        annotated_frame = results[0].plot()
+        for box in results[0].boxes:
+            bbox = box.xyxy[0].cpu().numpy().tolist()
+            x1, y1, x2, y2 = map(int, bbox)
+            class_name = results[0].names[int(box.cls[0])]
+            confidence = float(box.conf[0])
+            
+            detections.append({
+                "class": class_name,
+                "confidence": confidence,
+                "bbox": bbox
+            })
+            
+            # 繪製邊界框
+            label = f"{class_name} {confidence:.2f}"
+            cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            
+            # 繪製標籤
+            (label_w, label_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
+            cv2.rectangle(annotated_frame, (x1, y1 - label_h - 10), (x1 + label_w, y1), (0, 255, 0), -1)
+            cv2.putText(annotated_frame, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
         
         # 將圖像轉換為 base64
         encode_start = time.time()
@@ -119,9 +146,11 @@ def detect_stream_frame(stream_url: str, imgsz: int = 416, conf: float = 0.3, ti
             "detection_count": len(detections),
             "annotated_image_base64": img_base64,
             "frame_size": {"height": frame.shape[0], "width": frame.shape[1]},
+            "stream_url": DEFAULT_STREAM_URL,
             "parameters": {
                 "imgsz": imgsz,
-                "conf": conf
+                "conf": conf,
+                "use_kalman": use_kalman
             },
             "performance": {
                 "total_time": round(total_time, 2),
