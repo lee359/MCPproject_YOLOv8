@@ -4,7 +4,7 @@ import numpy as np
 from filterpy.kalman import KalmanFilter
 
 # ESP32-CAM 設定
-ESP32_URL = 'http://192.168.0.102:81/stream'
+ESP32_URL = 'http://192.168.0.103:81/stream'
 cap = cv2.VideoCapture(ESP32_URL)
 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
@@ -48,7 +48,11 @@ if not cap.isOpened():
 
 print("✅ 成功連線，開始辨識...")
 
-frame_skip, frame_count = 5, 0
+# 設定視窗大小（可調整窗口顯示）
+cv2.namedWindow("ESP32-CAM + YOLOv8", cv2.WINDOW_NORMAL)
+
+frame_skip, frame_count = 0.7, 0  # frame_skip: 調整檢測頻率 (越大越慢，如 30 = 1 FPS)
+max_age = 15  # 物體消失前的最大幀數 (增加此值可減少閃爍)
 
 while True:
     ret, frame = cap.read()
@@ -85,7 +89,7 @@ while True:
     # 更新所有追踪物體的年齡
     for obj_id in list(tracked_objects.keys()):
         tracked_objects[obj_id]['age'] += 1
-        if tracked_objects[obj_id]['age'] > 5:  # 5 幀後刪除
+        if tracked_objects[obj_id]['age'] > max_age:  # 使用可調整的 max_age
             del tracked_objects[obj_id]
     
     # 匹配當前檢測與已追踪物體
@@ -130,10 +134,10 @@ while True:
             }
             object_id_counter[0] += 1
     
-    # 繪製穩定的追踪結果（只顯示當前幀匹配的物體）
+    # 繪製穩定的追踪結果（顯示最近檢測到的物體，包括暫時未匹配的）
     annotated_frame = frame.copy()
     for obj_id, tracked in tracked_objects.items():
-        if tracked['age'] == 0:  # 只顯示當前幀有匹配的物體
+        if tracked['age'] <= 3:  # 顯示最近 3 幀內有活動的物體（減少閃爍）
             # 使用 Kalman 平滑後的中心點重建邊界框
             smoothed_center = tracked['kf'].x[:2].flatten()
             bbox = tracked['bbox']
