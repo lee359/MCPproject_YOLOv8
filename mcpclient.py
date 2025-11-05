@@ -9,6 +9,8 @@ import time
 import requests
 import os
 from filterpy.kalman import KalmanFilter
+import torch
+import sys
 
 # 獲取腳本所在目錄的絕對路徑
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -19,6 +21,10 @@ DEFAULT_STREAM_URL = 'http://192.168.0.103:81/stream'  # 更新為 .103
 
 # 加載訓練好的模型（使用絕對路徑）
 model = YOLO(MODEL_PATH)
+
+# 檢查是否有可用的 GPU 並將模型轉移
+if torch.cuda.is_available():
+    model.to('cuda')
 
 # Create an MCP server
 mcp = FastMCP("YOLOv8 Detection Server")

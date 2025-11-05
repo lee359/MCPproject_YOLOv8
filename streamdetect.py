@@ -2,6 +2,7 @@ import cv2
 from ultralytics import YOLO
 import numpy as np
 from filterpy.kalman import KalmanFilter
+import torch
 
 # ESP32-CAM 設定
 ESP32_URL = 'http://192.168.0.103:81/stream'
@@ -10,6 +11,14 @@ cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
 # 載入模型
 model = YOLO('best.pt')
+
+# 檢查是否有可用的 GPU 並將模型轉移
+if torch.cuda.is_available():
+    print("偵測到 CUDA，正在將模型轉移到 GPU...")
+    model.to('cuda')
+    print("模型已成功轉移到 GPU。")
+else:
+    print("未偵測到 CUDA，模型將在 CPU 上運行。")
 
 # 追踪系統：存儲每個物體的 Kalman Filter
 tracked_objects = {}
