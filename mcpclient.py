@@ -12,12 +12,26 @@ from filterpy.kalman import KalmanFilter
 import torch
 import sys
 
+# 重新加入 url_is_accessible 輔助函數
+def url_is_accessible(url, timeout=5):
+    """檢查 URL 是否可訪問（使用 GET 方法以支援 ESP32-CAM）"""
+    try:
+        # ESP32-CAM 不支援 HEAD 請求，改用 GET 但只讀取少量數據
+        response = requests.get(url, timeout=timeout, stream=True)
+        # 接受 200 (OK) 和 405 (Method Not Allowed) 都視為可訪問
+        # 因為某些 ESP32-CAM 對 stream endpoint 會回傳 405 給 HEAD 請求
+        accessible = response.status_code in [200, 405]
+        response.close()
+        return accessible
+    except requests.RequestException:
+        return False
+
 # 獲取腳本所在目錄的絕對路徑
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(SCRIPT_DIR, "best.pt")
 
 # ESP32-CAM 串流 URL
-DEFAULT_STREAM_URL = 'http://192.168.0.103:81/stream'  # 更新為 .103
+DEFAULT_STREAM_URL = 'http://192.168.0.104:81/stream'  # 更新為 .104
 
 # 加載訓練好的模型（使用絕對路徑）
 model = YOLO(MODEL_PATH)
@@ -59,70 +73,40 @@ def calculate_distance(center1, center2):
 
 @mcp.tool()
 def detect_esp32_stream(
-    stream_url: str = None,
-    imgsz: int = 416, 
-    conf: float = 0.25, 
-    frame_skip: int = 1,
-    max_age: int = 5,
-    display_tolerance: int = 3,
-    use_kalman: bool = True
+        url: str = None,
+        imgsz: int = 640,
+        conf: float = 0.25,
+        frame_skip: int = 3,
+        max_age: int = 10,
+        display_tolerance: int = 2,
+        use_kalman: bool = True
 ) -> dict:
     """
-    從預設的 ESP32-CAM 串流進行單幀 YOLO 物體偵測（支援 FPS 和閃爍控制）
-    
-    預設串流 URL: http://192.168.0.103:81/stream
-    
-    Args:
-        stream_url: 串流 URL（可選，預設使用 http://192.168.0.103:81/stream）
-        imgsz: 圖像大小，預設 416
-        conf: 信心閾值，預設 0.25
-        frame_skip: 跳幀數量（越大 FPS 越低，如 30 = 1 FPS），預設 1
-        max_age: 物體最大存活幀數（預設 5）
-        display_tolerance: 顯示容忍幀數（age <= 此值時顯示，預設 3）
-        use_kalman: 是否使用 Kalman Filter 平滑追踪（預設 True）
-    
-    Returns:
-        dict: 包含偵測結果和註釋圖像的字典
-        
-    FPS 調整建議:
-        - frame_skip=1: 全速檢測（30 FPS 攝像頭 → 30 FPS）
-        - frame_skip=5: 平衡模式（30 FPS → 6 FPS）
-        - frame_skip=15: 節能模式（30 FPS → 2 FPS）
-        - frame_skip=30: 低速模式（30 FPS → 1 FPS）✅
-        - frame_skip=60: 超低速（30 FPS → 0.5 FPS）✅
-        
-    閃爍控制:
-        - max_age: 控制物體保留時間（建議 5-20）
-        - display_tolerance: 控制顯示容忍度（建議 3-7）
+    從 ESP32-CAM 的串流中偵測物體，並返回帶有標註的圖像和偵測結果。
     """
     start_time = time.time()
-    
-    # 使用自定義 URL 或預設 URL
-    target_url = stream_url if stream_url else DEFAULT_STREAM_URL
-    
-    # 追踪系統初始化
-    tracked_objects = {}
-    object_id_counter = [0]
-    
+    target_url = url if url else DEFAULT_STREAM_URL
+
+    # --- 步驟 1: 初始化所有變數，確保它們在任何路徑下都有定義 ---
+    yolo_time, read_time, predict_time, encode_time = 0, 0, 0, 0
+    total_frames = 0
+    success = False
+    error_message = ""
+    detections, tracked_objects = [], {}
+    img_base64 = ""
+    annotated_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    cap = None
+    object_id_counter = [0]  # <--- 修正：將遺失的 object_id_counter 加回來
+
     try:
-        # 連接到串流
+        # --- 步驟 2: 執行主要偵測邏輯 ---
+        if not url_is_accessible(target_url):
+            raise ConnectionError(f"無法訪問串流 URL: {target_url}")
+            
         cap = cv2.VideoCapture(target_url)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        
-        # 設定連接超時
-        connect_timeout = 5
-        wait_start = time.time()
-        
-        while not cap.isOpened() and (time.time() - wait_start) < connect_timeout:
-            time.sleep(0.1)
-        
         if not cap.isOpened():
-            return {
-                "success": False,
-                "error": f"無法在 {connect_timeout} 秒內連接到串流: {target_url}",
-                "elapsed_time": round(time.time() - start_time, 2)
-            }
-        
+            raise IOError(f"無法打開串流: {target_url}")
+
         # 多幀檢測循環（用於 Kalman Filter 追踪）
         frame_count = 0
         frames_to_process = max(frame_skip * 3, 5)  # 至少處理 5 幀或 3 個檢測週期
@@ -215,17 +199,14 @@ def detect_esp32_stream(
         read_time = time.time() - read_start
         
         if not ret:
-            cap.release()
-            return {
-                "success": False,
-                "error": "無法讀取畫面",
-                "elapsed_time": round(time.time() - start_time, 2)
-            }
-        
+            # 如果讀不到最後一幀，也視為一個可處理的狀況，而非讓程式崩潰
+            annotated_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+            cv2.putText(annotated_frame, "Stream ended unexpectedly", (50, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        else:
+            annotated_frame = frame.copy()
+
         # 繪製穩定的追踪結果
         predict_start = time.time()
-        detections = []
-        annotated_frame = frame.copy()
         
         for obj_id, tracked in tracked_objects.items():
             if tracked['age'] <= display_tolerance:  # 使用可調整的顯示容忍度
@@ -271,42 +252,53 @@ def detect_esp32_stream(
         img_base64 = base64.b64encode(buffer).decode('utf-8')
         encode_time = time.time() - encode_start
         
-        cap.release()
+        success = True
+
+    except Exception as e:
+        # --- 步驟 3: 處理所有可能的錯誤 ---
+        error_message = str(e)
+        success = False
+        # 在黑色畫面上顯示錯誤訊息
+        cv2.putText(annotated_frame, f"Error: {error_message[:50]}", (50, 240), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        _, buffer = cv2.imencode('.jpg', annotated_frame)
+        img_base64 = base64.b64encode(buffer).decode('utf-8')
+
+    finally:
+        # --- 步驟 4: 無論成功或失敗，都執行清理和記錄 ---
+        if cap is not None and cap.isOpened():
+            cap.release()
         
         total_time = time.time() - start_time
+
+        params = {
+            "target_url": target_url, "imgsz": imgsz, "conf": conf, 
+            "frame_skip": frame_skip, "max_age": max_age, 
+            "display_tolerance": display_tolerance, "use_kalman": use_kalman
+        }
         
-        return {
-            "success": True,
+        result = {
+            "success": success,
+            "error": error_message,
             "detections": detections,
             "detection_count": len(detections),
             "tracked_objects_count": len(tracked_objects),
             "annotated_image_base64": img_base64,
-            "frame_size": {"height": frame.shape[0], "width": frame.shape[1]},
+            "frame_size": {"height": annotated_frame.shape[0], "width": annotated_frame.shape[1]},
             "stream_url": target_url,
-            "parameters": {
-                "imgsz": imgsz,
-                "conf": conf,
-                "frame_skip": frame_skip,
-                "max_age": max_age,
-                "display_tolerance": display_tolerance,
-                "use_kalman": use_kalman
-            },
+            "parameters": params,
             "performance": {
-                "total_time": round(total_time, 2),
-                "read_time": round(read_time, 2),
-                "predict_time": round(predict_time, 2),
-                "encode_time": round(encode_time, 2),
-                "frames_processed": frame_count
+                "total_time": round(total_time, 3),
+                "yolo_inference_time": round(yolo_time, 3),
+                "frame_read_time": round(read_time, 3),
+                "kalman_predict_time": round(predict_time, 3),
+                "base64_encode_time": round(encode_time, 3),
+                "total_frames_processed": total_frames
             }
         }
         
-    except Exception as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "error_type": type(e).__name__,
-            "elapsed_time": round(time.time() - start_time, 2)
-        }
+        return result
+
 
 @mcp.tool()
 def detect_stream_frame_simple(stream_url: str, imgsz: int = 416, conf: float = 0.3) -> dict:
@@ -374,25 +366,26 @@ def detect_stream_frame_simple(stream_url: str, imgsz: int = 416, conf: float = 
         }
 
 @mcp.tool()
-def check_stream_health(stream_url: str) -> dict:
+def check_stream_health(url: str = DEFAULT_STREAM_URL, timeout: int = 5) -> dict:
     """
-    快速檢查串流健康狀態（用於診斷連接問題）
+    檢查 ESP32-CAM 串流是否可訪問（透過 HTTP 和 OpenCV 測試連接性）
     
     Args:
-        stream_url: 串流 URL
+        url: 串流 URL
+        timeout: 超時時間（秒），預設 5 秒
     
     Returns:
-        dict: 串流健康狀態和診斷資訊
+        dict: 健康檢查結果
     """
     result = {
-        "url": stream_url,
+        "url": url,
         "timestamp": time.time()
     }
     
     try:
-        # HTTP 測試
+        # HTTP 測试
         start = time.time()
-        response = requests.get(stream_url, timeout=3, stream=True)
+        response = requests.get(url, timeout=timeout, stream=True)
         http_time = time.time() - start
         
         result["http_status"] = response.status_code
@@ -409,7 +402,7 @@ def check_stream_health(stream_url: str) -> dict:
         
         # OpenCV 測試
         start = time.time()
-        cap = cv2.VideoCapture(stream_url)
+        cap = cv2.VideoCapture(url)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         opencv_connect_time = time.time() - start
         

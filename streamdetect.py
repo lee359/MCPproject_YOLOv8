@@ -5,7 +5,7 @@ from filterpy.kalman import KalmanFilter
 import torch
 
 # ESP32-CAM 設定
-ESP32_URL = 'http://192.168.0.103:81/stream'
+ESP32_URL = 'http://192.168.0.104:81/stream'
 cap = cv2.VideoCapture(ESP32_URL)
 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
@@ -59,6 +59,7 @@ print("✅ 成功連線，開始辨識...")
 
 # 設定視窗大小（可調整窗口顯示）
 cv2.namedWindow("ESP32-CAM + YOLOv8", cv2.WINDOW_NORMAL)
+cv2.resizeWindow("ESP32-CAM + YOLOv8", 640, 480)  # 設定視窗大小為 640x480
 
 frame_skip, frame_count = 1, 0  # frame_skip: 調整檢測頻率 (越大越慢，如 30 = 1 FPS)
 max_age = 5  # 物體消失前的最大幀數 (增加此值可減少閃爍)
@@ -82,8 +83,12 @@ while True:
     for _ in range(int(cap.get(cv2.CAP_PROP_BUFFERSIZE))):
         cap.grab()
     
-    # 模型推論
-    results = model.predict(source=frame, imgsz=416, conf=0.25, iou=0.15, verbose=False)
+    # 模型推論（調整參數以提高準確度）
+    # imgsz 改為 640（YOLOv8 標準尺寸，提高準確度）
+    # conf 維持 0.25（信心度閾值）
+    # iou 改為 0.45（標準 NMS 閾值，減少重疊框）
+    # half=False 強制使用全精度（FP32），避免 GPU 半精度導致的準確度下降
+    results = model.predict(source=frame, imgsz=640, conf=0.25, iou=0.45, verbose=False, half=False)
     
     # 提取檢測結果
     current_detections = [
