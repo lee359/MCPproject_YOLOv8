@@ -88,7 +88,7 @@ while True:
     # conf 維持 0.25（信心度閾值）
     # iou 改為 0.45（標準 NMS 閾值，減少重疊框）
     # half=False 強制使用全精度（FP32），避免 GPU 半精度導致的準確度下降
-    results = model.predict(source=frame, imgsz=640, conf=0.25, iou=0.45, verbose=False, half=False)
+    results = model.predict(source=frame, imgsz=640, conf=0.60, iou=0.3, verbose=False, half=False)
     
     # 提取檢測結果
     current_detections = [

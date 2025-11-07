@@ -1,5 +1,6 @@
 # server.py
 from mcp.server.fastmcp import FastMCP, Image
+from datetime import datetime
 from ultralytics import YOLO
 import cv2
 import numpy as np
@@ -75,7 +76,8 @@ def calculate_distance(center1, center2):
 def detect_esp32_stream(
         url: str = None,
         imgsz: int = 640,
-        conf: float = 0.25,
+        conf: float = 0.5,
+        iou: float = 0.3,
         frame_skip: int = 3,
         max_age: int = 10,
         display_tolerance: int = 2,
@@ -127,7 +129,9 @@ def detect_esp32_stream(
                 cap.grab()
             
             # 執行 YOLO 偵測
-            results = model.predict(source=frame, imgsz=imgsz, conf=conf, iou=0.15, verbose=False)
+            yolo_start = time.time()
+            results = model.predict(source=frame, imgsz=imgsz, conf=conf, iou=iou, verbose=False)
+            yolo_time += time.time() - yolo_start
             
             # 提取檢測結果
             current_detections = [
@@ -144,7 +148,7 @@ def detect_esp32_stream(
                 tracked_objects[obj_id]['age'] += 1
                 if tracked_objects[obj_id]['age'] > max_age:
                     del tracked_objects[obj_id]
-            
+
             if use_kalman:
                 # Kalman Filter 追踪模式
                 for det in current_detections:
@@ -278,30 +282,20 @@ def detect_esp32_stream(
         }
         
         result = {
-            "success": success,
-            "error": error_message,
-            "detections": detections,
+            "timestamp": datetime.now().isoformat(),
+            "success": True,
             "detection_count": len(detections),
-            "tracked_objects_count": len(tracked_objects),
-            "annotated_image_base64": img_base64,
-            "frame_size": {"height": annotated_frame.shape[0], "width": annotated_frame.shape[1]},
-            "stream_url": target_url,
-            "parameters": params,
-            "performance": {
-                "total_time": round(total_time, 3),
-                "yolo_inference_time": round(yolo_time, 3),
-                "frame_read_time": round(read_time, 3),
-                "kalman_predict_time": round(predict_time, 3),
-                "base64_encode_time": round(encode_time, 3),
-                "total_frames_processed": total_frames
-            }
+            "detections": detections,
+            "total_time": round(total_time, 3),
+            "yolo_inference_time": round(yolo_time, 3)
+                        
         }
         
         return result
 
 
 @mcp.tool()
-def detect_stream_frame_simple(stream_url: str, imgsz: int = 416, conf: float = 0.3) -> dict:
+def detect_stream_frame_simple(stream_url: str, imgsz: int = 640, conf: float = 0.6, iou: float = 0.3) -> dict:
     """
     從串流 URL 捕獲一幀並進行 YOLO 物體偵測（簡化版，不返回圖像）
     
@@ -314,6 +308,7 @@ def detect_stream_frame_simple(stream_url: str, imgsz: int = 416, conf: float = 
         dict: 只包含偵測結果（不含圖像，回應更快）
     """
     start_time = time.time()
+    yolo_time = 0  # 初始化 yolo_time
     
     try:
         cap = cv2.VideoCapture(stream_url)
@@ -334,8 +329,10 @@ def detect_stream_frame_simple(stream_url: str, imgsz: int = 416, conf: float = 
             }
         
         # 執行 YOLO 偵測
+        yolo_start = time.time()
         results = model.predict(source=frame, imgsz=imgsz, conf=conf, verbose=False)
-        
+        yolo_time = time.time() - yolo_start
+
         # 取得偵測結果
         detections = []
         for r in results:
@@ -350,12 +347,15 @@ def detect_stream_frame_simple(stream_url: str, imgsz: int = 416, conf: float = 
         
         cap.release()
         
+        total_time = time.time() - start_time
+        
         return {
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "success": True,
-            "detections": detections,
             "detection_count": len(detections),
-            "frame_size": {"height": frame.shape[0], "width": frame.shape[1]},
-            "elapsed_time": round(time.time() - start_time, 2)
+            "detections": detections,
+            "total_time": round(total_time, 3),
+            "yolo_inference_time": round(yolo_time, 3)
         }
         
     except Exception as e:
