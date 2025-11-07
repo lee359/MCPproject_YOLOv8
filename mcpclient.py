@@ -12,6 +12,8 @@ import os
 from filterpy.kalman import KalmanFilter
 import torch
 import sys
+import csv
+import json
 
 # 重新加入 url_is_accessible 輔助函數
 def url_is_accessible(url, timeout=5):
@@ -30,6 +32,7 @@ def url_is_accessible(url, timeout=5):
 # 獲取腳本所在目錄的絕對路徑
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(SCRIPT_DIR, "best.pt")
+CSV_LOG_PATH = os.path.join(SCRIPT_DIR, "detection_logs.csv")
 
 # ESP32-CAM 串流 URL
 DEFAULT_STREAM_URL = 'http://192.168.0.104:81/stream'  # 更新為 .104
@@ -71,6 +74,43 @@ def get_center(bbox):
 def calculate_distance(center1, center2):
     """計算兩點間距離"""
     return np.sqrt((center1[0] - center2[0])**2 + (center1[1] - center2[1])**2)
+
+def log_detection_to_csv(result_data):
+    """
+    將偵測結果記錄到 CSV 檔案
+    
+    Args:
+        result_data: detect_stream_frame_simple 的返回值
+    """
+    # CSV 欄位名稱（移除 success）
+    fieldnames = ['timestamp', 'detection_count', 'class', 'confidence', 'bbox', 'total_time', 'yolo_inference_time']
+    
+    # 檢查檔案是否存在
+    file_exists = os.path.isfile(CSV_LOG_PATH)
+    
+    try:
+        with open(CSV_LOG_PATH, 'a', newline='', encoding='utf-8') as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            
+            # 如果檔案不存在，寫入標題列
+            if not file_exists:
+                writer.writeheader()
+            
+            # 準備要寫入的資料（移除 success）
+            row_data = {
+                'timestamp': result_data.get('timestamp', ''),
+                'detection_count': result_data.get('detection_count', 0),
+                'class': result_data.get('class', ''),
+                'confidence': result_data.get('confidence', 0),
+                'bbox': result_data.get('bbox', ''),
+                'total_time': result_data.get('total_time', 0),
+                'yolo_inference_time': result_data.get('yolo_inference_time', 0)
+            }
+            
+            writer.writerow(row_data)
+            
+    except Exception as e:
+        print(f"❌ CSV 記錄失敗: {e}", file=sys.stderr)
 
 @mcp.tool()
 def detect_esp32_stream(
@@ -295,7 +335,7 @@ def detect_esp32_stream(
 
 
 @mcp.tool()
-def detect_stream_frame_simple(stream_url: str, imgsz: int = 640, conf: float = 0.6, iou: float = 0.3) -> dict:
+def detect_stream_frame_simple(stream_url: str, imgsz: int = 640, conf: float = 0.5, iou: float = 0.3) -> dict:
     """
     從串流 URL 捕獲一幀並進行 YOLO 物體偵測（簡化版，不返回圖像）
     
@@ -349,21 +389,44 @@ def detect_stream_frame_simple(stream_url: str, imgsz: int = 640, conf: float = 
         
         total_time = time.time() - start_time
         
-        return {
+        # 提取第一个检测物体的信息（如果有）
+        first_class = detections[0]['class'] if detections else ''
+        first_confidence = round(detections[0]['confidence'], 3) if detections else 0
+        # 将 bbox 中的每个坐标都限制到小数点后第三位
+        first_bbox = str([round(coord, 3) for coord in detections[0]['bbox']]) if detections else ''
+        
+        result = {
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "success": True,
             "detection_count": len(detections),
-            "detections": detections,
+            "class": first_class,
+            "confidence": first_confidence,
+            "bbox": first_bbox,
             "total_time": round(total_time, 3),
             "yolo_inference_time": round(yolo_time, 3)
         }
         
+        # 記錄到 CSV
+        log_detection_to_csv(result)
+        
+        return result
+        
     except Exception as e:
-        return {
-            "success": False,
+        error_result = {
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "detection_count": 0,
+            "class": '',
+            "confidence": 0,
+            "bbox": '',
+            "total_time": round(time.time() - start_time, 3),
+            "yolo_inference_time": 0,
             "error": str(e),
             "error_type": type(e).__name__
         }
+        
+        # 記錄錯誤到 CSV
+        log_detection_to_csv(error_result)
+        
+        return error_result
 
 @mcp.tool()
 def check_stream_health(url: str = DEFAULT_STREAM_URL, timeout: int = 5) -> dict:
