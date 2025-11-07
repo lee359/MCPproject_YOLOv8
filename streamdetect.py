@@ -5,7 +5,7 @@ from filterpy.kalman import KalmanFilter
 import torch
 
 # ESP32-CAM 設定
-ESP32_URL = 'http://192.168.0.104:81/stream'
+ESP32_URL = 'http://192.168.0.102:81/stream'
 cap = cv2.VideoCapture(ESP32_URL)
 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 

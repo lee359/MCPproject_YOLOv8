@@ -33,9 +33,10 @@ def url_is_accessible(url, timeout=5):
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(SCRIPT_DIR, "best.pt")
 CSV_LOG_PATH = os.path.join(SCRIPT_DIR, "detection_logs.csv")
+CSV_LOG_MULTI_PATH = os.path.join(SCRIPT_DIR, "detection_logs_multi.csv")
 
 # ESP32-CAM 串流 URL
-DEFAULT_STREAM_URL = 'http://192.168.0.104:81/stream'  # 更新為 .104
+DEFAULT_STREAM_URL = 'http://192.168.0.102:81/stream'
 
 # 加載訓練好的模型（使用絕對路徑）
 model = YOLO(MODEL_PATH)
@@ -108,6 +109,59 @@ def log_detection_to_csv(result_data):
             }
             
             writer.writerow(row_data)
+            
+    except Exception as e:
+        print(f"❌ CSV 記錄失敗: {e}", file=sys.stderr)
+
+def log_multi_detection_to_csv(result_data):
+    """
+    將多物體偵測結果記錄到 CSV 檔案（每個物體一行）
+    
+    Args:
+        result_data: detect_stream_frame_multi 的返回值
+    """
+    # CSV 欄位名稱
+    fieldnames = ['timestamp', 'detection_count', 'class', 'confidence', 'bbox', 'total_time', 'yolo_inference_time']
+    
+    # 檢查檔案是否存在
+    file_exists = os.path.isfile(CSV_LOG_MULTI_PATH)
+    
+    try:
+        with open(CSV_LOG_MULTI_PATH, 'a', newline='', encoding='utf-8') as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            
+            # 如果檔案不存在，寫入標題列
+            if not file_exists:
+                writer.writeheader()
+            
+            # 獲取所有偵測到的物體
+            all_detections = result_data.get('all_detections', [])
+            
+            if all_detections:
+                # 有檢測到物體：為每個物體寫入一行
+                for det in all_detections:
+                    row_data = {
+                        'timestamp': result_data.get('timestamp', ''),
+                        'detection_count': result_data.get('detection_count', 0),
+                        'class': det.get('class', ''),
+                        'confidence': det.get('confidence', 0),
+                        'bbox': str(det.get('bbox', [])),
+                        'total_time': result_data.get('total_time', 0),
+                        'yolo_inference_time': result_data.get('yolo_inference_time', 0)
+                    }
+                    writer.writerow(row_data)
+            else:
+                # 沒有檢測到物體：寫入一行空記錄
+                row_data = {
+                    'timestamp': result_data.get('timestamp', ''),
+                    'detection_count': 0,
+                    'class': '',
+                    'confidence': 0,
+                    'bbox': '',
+                    'total_time': result_data.get('total_time', 0),
+                    'yolo_inference_time': result_data.get('yolo_inference_time', 0)
+                }
+                writer.writerow(row_data)
             
     except Exception as e:
         print(f"❌ CSV 記錄失敗: {e}", file=sys.stderr)
@@ -335,7 +389,7 @@ def detect_esp32_stream(
 
 
 @mcp.tool()
-def detect_stream_frame_simple(stream_url: str, imgsz: int = 640, conf: float = 0.5, iou: float = 0.3) -> dict:
+def detect_stream_frame_simple(stream_url: str=None, imgsz: int = 640, conf: float = 0.5, iou: float = 0.3) -> dict:
     """
     從串流 URL 捕獲一幀並進行 YOLO 物體偵測（簡化版，不返回圖像）
     
@@ -349,15 +403,16 @@ def detect_stream_frame_simple(stream_url: str, imgsz: int = 640, conf: float = 
     """
     start_time = time.time()
     yolo_time = 0  # 初始化 yolo_time
+    target_url = stream_url if stream_url else DEFAULT_STREAM_URL
     
     try:
-        cap = cv2.VideoCapture(stream_url)
+        cap = cv2.VideoCapture(target_url)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         
         if not cap.isOpened():
             return {
                 "success": False,
-                "error": f"無法連接到串流: {stream_url}"
+                "error": f"無法連接到串流: {target_url}"
             }
         
         ret, frame = cap.read()
@@ -425,6 +480,110 @@ def detect_stream_frame_simple(stream_url: str, imgsz: int = 640, conf: float = 
         
         # 記錄錯誤到 CSV
         log_detection_to_csv(error_result)
+        
+        return error_result
+
+@mcp.tool()
+def detect_stream_frame_multi(stream_url: str=None, imgsz: int = 640, conf: float = 0.5, iou: float = 0.3) -> dict:
+    """
+    從串流 URL 捕獲一幀並進行 YOLO 物體偵測（多物體版本，返回所有檢測物體）
+    
+    適用場景：
+    - 同時存在多個物體（例如：貓+狗）
+    - 需要記錄每個檢測物體的完整資訊
+    - 實驗場景 C 和 D（多物體偵測）
+    
+    Args:
+        stream_url: 串流 URL (例如: http://192.168.0.103:81/stream)
+        imgsz: 圖像大小，預設 640
+        conf: 信心閾值，預設 0.5
+        iou: IOU 閾值，預設 0.3
+    
+    Returns:
+        dict: 包含所有偵測物體的詳細資訊
+            - timestamp: 偵測時間戳記（格式：YYYY-MM-DD HH:MM:SS）
+            - detection_count: 檢測到的物體數量
+            - all_detections: 所有物體的列表，每個物體包含 class, confidence, bbox
+            - total_time: 總處理時間（秒）
+            - yolo_inference_time: YOLO 推理時間（秒）
+    """
+    start_time = time.time()
+    target_url = stream_url if stream_url else DEFAULT_STREAM_URL
+    yolo_time = 0
+    
+    try:
+        cap = cv2.VideoCapture(target_url)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        
+        if not cap.isOpened():
+            return {
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "detection_count": 0,
+                "all_detections": [],
+                "error": f"無法連接到串流: {target_url}",
+                "total_time": 0,
+                "yolo_inference_time": 0
+            }
+        
+        ret, frame = cap.read()
+        if not ret:
+            cap.release()
+            return {
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "detection_count": 0,
+                "all_detections": [],
+                "error": "無法讀取畫面",
+                "total_time": 0,
+                "yolo_inference_time": 0
+            }
+        
+        # 執行 YOLO 偵測
+        yolo_start = time.time()
+        results = model.predict(source=frame, imgsz=imgsz, conf=conf, iou=iou, verbose=False)
+        yolo_time = time.time() - yolo_start
+
+        # 取得所有偵測結果
+        all_detections = []
+        for r in results:
+            boxes = r.boxes
+            for box in boxes:
+                detection = {
+                    "class": r.names[int(box.cls[0])],
+                    "confidence": round(float(box.conf[0]), 3),
+                    "bbox": [round(coord, 3) for coord in box.xyxy[0].tolist()]
+                }
+                all_detections.append(detection)
+        
+        cap.release()
+        
+        total_time = time.time() - start_time
+        
+        result = {
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "detection_count": len(all_detections),
+            "all_detections": all_detections,
+            "total_time": round(total_time, 3),
+            "yolo_inference_time": round(yolo_time, 3)
+        }
+        
+        # 記錄到 CSV（每個物體一行）
+        log_multi_detection_to_csv(result)
+        
+        return result
+        
+    except Exception as e:
+        error_result = {
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "detection_count": 0,
+            "all_detections": [],
+            "total_time": round(time.time() - start_time, 3),
+            "yolo_inference_time": 0,
+            "error": str(e),
+            "error_type": type(e).__name__
+        }
+        
+        # 記錄錯誤到 CSV
+        log_multi_detection_to_csv(error_result)
         
         return error_result
 
