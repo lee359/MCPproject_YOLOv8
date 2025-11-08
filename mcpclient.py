@@ -76,6 +76,42 @@ def calculate_distance(center1, center2):
     """計算兩點間距離"""
     return np.sqrt((center1[0] - center2[0])**2 + (center1[1] - center2[1])**2)
 
+def calculate_iou(bbox1, bbox2):
+    """
+    計算兩個邊界框的 IoU (Intersection over Union)
+    bbox 格式: [x1, y1, x2, y2]
+    返回值範圍: 0.0 (無重疊) ~ 1.0 (完全重疊)
+    """
+    x1_min, y1_min, x1_max, y1_max = bbox1
+    x2_min, y2_min, x2_max, y2_max = bbox2
+    
+    # 計算交集區域
+    inter_x_min = max(x1_min, x2_min)
+    inter_y_min = max(y1_min, y2_min)
+    inter_x_max = min(x1_max, x2_max)
+    inter_y_max = min(y1_max, y2_max)
+    
+    # 如果沒有交集
+    if inter_x_max < inter_x_min or inter_y_max < inter_y_min:
+        return 0.0
+    
+    # 計算交集面積
+    inter_area = (inter_x_max - inter_x_min) * (inter_y_max - inter_y_min)
+    
+    # 計算兩個框的面積
+    bbox1_area = (x1_max - x1_min) * (y1_max - y1_min)
+    bbox2_area = (x2_max - x2_min) * (y2_max - y2_min)
+    
+    # 計算聯集面積
+    union_area = bbox1_area + bbox2_area - inter_area
+    
+    # 避免除以零
+    if union_area == 0:
+        return 0.0
+    
+    # 返回 IoU
+    return inter_area / union_area
+
 def log_detection_to_csv(result_data):
     """
     將偵測結果記錄到 CSV 檔案
@@ -146,6 +182,62 @@ def log_multi_detection_to_csv(result_data):
                         'class': det.get('class', ''),
                         'confidence': det.get('confidence', 0),
                         'bbox': str(det.get('bbox', [])),
+                        'total_time': result_data.get('total_time', 0),
+                        'yolo_inference_time': result_data.get('yolo_inference_time', 0)
+                    }
+                    writer.writerow(row_data)
+            else:
+                # 沒有檢測到物體：寫入一行空記錄
+                row_data = {
+                    'timestamp': result_data.get('timestamp', ''),
+                    'detection_count': 0,
+                    'class': '',
+                    'confidence': 0,
+                    'bbox': '',
+                    'total_time': result_data.get('total_time', 0),
+                    'yolo_inference_time': result_data.get('yolo_inference_time', 0)
+                }
+                writer.writerow(row_data)
+            
+    except Exception as e:
+        print(f"❌ CSV 記錄失敗: {e}", file=sys.stderr)
+
+def log_tracking_to_csv(result_data):
+    """
+    將追踪結果記錄到 CSV 檔案（每個物體一行）
+    
+    Args:
+        result_data: detect_esp32_stream 的返回值
+    """
+    # CSV 欄位名稱（與其他 CSV 格式一致）
+    fieldnames = ['timestamp', 'detection_count', 'class', 'confidence', 'bbox', 'total_time', 'yolo_inference_time']
+    
+    # 使用與 multi 不同的檔案名稱
+    csv_path = os.path.join(SCRIPT_DIR, "detection_logs_tracked.csv")
+    
+    # 檢查檔案是否存在
+    file_exists = os.path.isfile(csv_path)
+    
+    try:
+        with open(csv_path, 'a', newline='', encoding='utf-8') as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            
+            # 如果檔案不存在，寫入標題列
+            if not file_exists:
+                writer.writeheader()
+            
+            # 獲取所有追踪到的物體
+            detections = result_data.get('detections', [])
+            
+            if detections:
+                # 有檢測到物體：為每個物體寫入一行
+                for det in detections:
+                    row_data = {
+                        'timestamp': result_data.get('timestamp', ''),
+                        'detection_count': result_data.get('detection_count', 0),
+                        'class': det.get('class', ''),
+                        'confidence': round(det.get('confidence', 0), 3),
+                        'bbox': str([round(coord, 3) for coord in det.get('bbox', [])]),
                         'total_time': result_data.get('total_time', 0),
                         'yolo_inference_time': result_data.get('yolo_inference_time', 0)
                     }
@@ -244,42 +336,62 @@ def detect_esp32_stream(
                     del tracked_objects[obj_id]
 
             if use_kalman:
-                # Kalman Filter 追踪模式
+                # Kalman Filter 追踪模式 + IoU 驗證
                 for det in current_detections:
                     curr_center = get_center(det['bbox'])
-                    best_match_id, best_similarity = None, 0
+                    best_match_id, best_score = None, 0
                     
-                    # 尋找最佳匹配
+                    # 尋找最佳匹配（結合距離、IoU 和置信度）
                     for obj_id, tracked in tracked_objects.items():
                         if tracked['cls'] == det['cls']:
                             predicted_center = tracked['kf'].x[:2].flatten()
                             distance = calculate_distance(curr_center, predicted_center)
                             
-                            if distance < 80:
-                                similarity = 1 / (1 + distance / 50)
-                                if similarity > best_similarity:
-                                    best_similarity = similarity
-                                    best_match_id = obj_id
+                            # ✅ 嚴格的距離閾值：< 40 像素（進一步降低）
+                            if distance < 40:
+                                # 計算 IoU 以驗證是否為同一物體
+                                iou = calculate_iou(det['bbox'], tracked['bbox'])
+                                
+                                # ✅ IoU 必須 > 0.3 才認為是同一物體
+                                if iou > 0.3:
+                                    # 綜合評分：距離相似度 (40%) + IoU (60%)
+                                    dist_similarity = 1 / (1 + distance / 20)
+                                    combined_score = 0.4 * dist_similarity + 0.6 * iou
+                                    
+                                    if combined_score > best_score:
+                                        best_score = combined_score
+                                        best_match_id = obj_id
                     
                     # 更新或創建物體追踪
-                    if best_match_id and best_similarity > 0.4:
+                    # ✅ 更嚴格的匹配閾值：0.65（綜合評分）
+                    if best_match_id and best_score > 0.65:
                         tracked_objects[best_match_id]['kf'].predict()
                         tracked_objects[best_match_id]['kf'].update(curr_center)
                         tracked_objects[best_match_id]['bbox'] = det['bbox']
                         tracked_objects[best_match_id]['conf'] = det['conf']
                         tracked_objects[best_match_id]['age'] = 0
-                    elif det['conf'] > 0.4:
-                        kf = create_kalman_filter()
-                        kf.x[:2] = np.array(curr_center).reshape(2, 1)
+                    elif det['conf'] > 0.6:  # ✅ 進一步提高新物體創建閾值到 0.6
+                        # ✅ 額外檢查：確保新物體與現有物體沒有高重疊
+                        is_duplicate = False
+                        for obj_id, tracked in tracked_objects.items():
+                            if tracked['cls'] == det['cls']:
+                                iou = calculate_iou(det['bbox'], tracked['bbox'])
+                                if iou > 0.5:  # 如果 IoU > 0.5，認為是重複
+                                    is_duplicate = True
+                                    break
                         
-                        tracked_objects[object_id_counter[0]] = {
-                            'kf': kf,
-                            'bbox': det['bbox'],
-                            'conf': det['conf'],
-                            'cls': det['cls'],
-                            'age': 0
-                        }
-                        object_id_counter[0] += 1
+                        if not is_duplicate:
+                            kf = create_kalman_filter()
+                            kf.x[:2] = np.array(curr_center).reshape(2, 1)
+                            
+                            tracked_objects[object_id_counter[0]] = {
+                                'kf': kf,
+                                'bbox': det['bbox'],
+                                'conf': det['conf'],
+                                'cls': det['cls'],
+                                'age': 0
+                            }
+                            object_id_counter[0] += 1
             else:
                 # 簡單模式：直接使用當前檢測
                 for det in current_detections:
@@ -328,9 +440,8 @@ def detect_esp32_stream(
                 
                 detections.append({
                     "class": class_name,
-                    "confidence": confidence,
-                    "bbox": [x1, y1, x2, y2],
-                    "age": tracked['age']
+                    "confidence": round(confidence, 3),
+                    "bbox": [round(x1, 3), round(y1, 3), round(x2, 3), round(y2, 3)]
                 })
                 
                 # 繪製邊界框
@@ -344,11 +455,8 @@ def detect_esp32_stream(
         
         predict_time = time.time() - predict_start
         
-        # 將圖像轉換為 base64
-        encode_start = time.time()
-        _, buffer = cv2.imencode('.jpg', annotated_frame)
-        img_base64 = base64.b64encode(buffer).decode('utf-8')
-        encode_time = time.time() - encode_start
+        # ✅ 保留繪製功能，但不轉換為 base64（節省傳輸量）
+        # 如果需要保存圖像，可以在這裡添加 cv2.imwrite() 保存到本地
         
         success = True
 
@@ -356,11 +464,9 @@ def detect_esp32_stream(
         # --- 步驟 3: 處理所有可能的錯誤 ---
         error_message = str(e)
         success = False
-        # 在黑色畫面上顯示錯誤訊息
+        # 在黑色畫面上顯示錯誤訊息（保留繪製功能）
         cv2.putText(annotated_frame, f"Error: {error_message[:50]}", (50, 240), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-        _, buffer = cv2.imencode('.jpg', annotated_frame)
-        img_base64 = base64.b64encode(buffer).decode('utf-8')
 
     finally:
         # --- 步驟 4: 無論成功或失敗，都執行清理和記錄 ---
@@ -376,14 +482,15 @@ def detect_esp32_stream(
         }
         
         result = {
-            "timestamp": datetime.now().isoformat(),
-            "success": True,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "detection_count": len(detections),
             "detections": detections,
             "total_time": round(total_time, 3),
             "yolo_inference_time": round(yolo_time, 3)
-                        
         }
+        
+        # ✅ 自動記錄到 CSV（追踪版本）
+        log_tracking_to_csv(result)
         
         return result
 
