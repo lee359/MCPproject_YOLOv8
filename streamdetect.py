@@ -59,8 +59,7 @@ print("✅ 成功連線，開始辨識...")
 
 # 設定視窗大小（可調整窗口顯示）
 cv2.namedWindow("ESP32-CAM + YOLOv8", cv2.WINDOW_NORMAL)
-cv2.resizeWindow("ESP32-CAM + YOLOv8", 640, 640)  # 設定視窗大小為 640x640
-
+cv2.resizeWindow("ESP32-CAM + YOLOv8", 640, 480)  # 設定視窗大小為 640x480
 frame_skip, frame_count = 1, 0  # frame_skip: 調整檢測頻率 (越大越慢，如 30 = 1 FPS)
 max_age = 5  # 物體消失前的最大幀數 (增加此值可減少閃爍)
 
