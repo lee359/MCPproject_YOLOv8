@@ -36,7 +36,7 @@ CSV_LOG_PATH = os.path.join(SCRIPT_DIR, "detection_logs.csv")
 CSV_LOG_MULTI_PATH = os.path.join(SCRIPT_DIR, "detection_logs_multi.csv")
 
 # ESP32-CAM 串流 URL
-DEFAULT_STREAM_URL = 'http://192.168.0.103:81/stream'
+DEFAULT_STREAM_URL = 'http://10.110.64.215:81/stream'
 
 # 加載訓練好的模型（使用絕對路徑）
 model = YOLO(MODEL_PATH)
