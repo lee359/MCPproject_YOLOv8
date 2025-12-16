@@ -36,7 +36,7 @@ CSV_LOG_PATH = os.path.join(SCRIPT_DIR, "detection_logs.csv")
 CSV_LOG_MULTI_PATH = os.path.join(SCRIPT_DIR, "detection_logs_multi.csv")
 
 # ESP32-CAM 串流 URL
-DEFAULT_STREAM_URL = 'http://10.110.64.215:81/stream'
+DEFAULT_STREAM_URL = 'http://192.168.0.104:81/stream'
 
 # 加載訓練好的模型（使用絕對路徑）
 model = YOLO(MODEL_PATH)
@@ -403,12 +403,7 @@ def detect_esp32_stream(
                     (label_w, label_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
                     cv2.rectangle(annotated_frame, (x1, y1 - label_h - 10), (x1 + label_w, y1), (0, 255, 0), -1)
                     cv2.putText(annotated_frame, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
-
-        # 轉換影像為 base64（可選）
-        annotated_image_base64 = ""
-        if annotated_frame is not None:
-            _, buf = cv2.imencode('.jpg', annotated_frame)
-            annotated_image_base64 = base64.b64encode(buf).decode('utf-8')
+        
 
     except Exception as e:
         # 發生錯誤時返回錯誤訊息
@@ -440,7 +435,6 @@ def detect_esp32_stream(
             "display_tolerance": display_tolerance,
             "use_kalman": use_kalman
         },
-        "annotated_image_base64": annotated_image_base64
     }
 
     # 記錄 CSV (追踪版)
